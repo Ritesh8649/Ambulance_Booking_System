@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { readPosition as readDevicePosition } from '../../lib/location';
+import { readPosition as readDevicePosition, ROUGH_ACCURACY_M } from '../../lib/location';
 import { useFocusEffect } from '@react-navigation/native';
 import { api } from '../../lib/api';
 import { useResync, useSocketEvent } from '../../lib/socket';
@@ -18,6 +18,7 @@ export default function BookScreen({ navigation }) {
   const [ambulanceType, setAmbulanceType] = useState('BLS');
   const [pickup, setPickup] = useState(null);          // { latitude, longitude, address_text }
   const [locating, setLocating] = useState(false);
+  const [locNote, setLocNote] = useState('');          // shown when the GPS fix is rough
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -54,9 +55,20 @@ export default function BookScreen({ navigation }) {
       // that never finishes loading.
       const pos = await readDevicePosition();
       const coords = { latitude: pos.latitude, longitude: pos.longitude };
-      const rev = await api.get(`/api/geo/reverse?lat=${coords.latitude}&lng=${coords.longitude}`);
-      setPickup({ ...coords, address_text: rev.location.address_text, pincode: rev.location.pincode });
+      // The fix is the part that matters. If the address lookup fails, keep the
+      // pin where GPS put it rather than discarding a good position.
+      setPickup({ ...coords, address_text: 'Locating address…', pincode: null });
+      setLocNote(
+        pos.stale || (pos.accuracy_m != null && pos.accuracy_m > ROUGH_ACCURACY_M)
+          ? `Approximate location${pos.accuracy_m ? ` (±${pos.accuracy_m} m)` : ''}. Check the pin and tap the map to move it if needed.`
+          : ''
+      );
+      const rev = await api.get(`/api/geo/reverse?lat=${coords.latitude}&lng=${coords.longitude}`).catch(() => null);
+      setPickup(rev?.location?.address_text
+        ? { ...coords, address_text: rev.location.address_text, pincode: rev.location.pincode }
+        : { ...coords, address_text: `${coords.latitude}, ${coords.longitude}`, pincode: null });
     } catch (e) {
+      setLocNote('');
       setError(
         e.code === 'DENIED'
           ? 'Location permission was declined. Type an address or tap the map to drop a pin instead.'
@@ -181,6 +193,7 @@ export default function BookScreen({ navigation }) {
           onPick={async (lat, lng) => {
             const coords = { latitude: Number(lat.toFixed(6)), longitude: Number(lng.toFixed(6)) };
             setPickup({ ...coords, address_text: 'Locating address…' });
+            setLocNote('');
             try {
               const rev = await api.get(`/api/geo/reverse?lat=${coords.latitude}&lng=${coords.longitude}`);
               setPickup({ ...coords, address_text: rev.location.address_text, pincode: rev.location.pincode });
@@ -210,6 +223,7 @@ export default function BookScreen({ navigation }) {
           onPress={useMyLocation}
           loading={locating}
         />
+        {locNote ? <Small style={[typo.tiny, { marginTop: spacing.xs }]}>{locNote}</Small> : null}
 
         <View style={{ marginTop: spacing.md }}>
           <Field

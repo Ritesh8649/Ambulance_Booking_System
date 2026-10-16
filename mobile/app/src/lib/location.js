@@ -14,8 +14,14 @@ import * as Location from 'expo-location';
  * 20-second ping loop corrects it almost immediately.
  */
 
-const FRESH_TIMEOUT_MS = 12_000;
-const LAST_KNOWN_MAX_AGE_MS = 2 * 60_000;
+const FRESH_TIMEOUT_MS = 15_000;
+// A cached fix is only reused when it is both recent and precise. The phone's
+// last known position is often a Wi-Fi or cell-tower estimate hundreds of
+// metres off, which put the pickup pin in the wrong street.
+const LAST_KNOWN_MAX_AGE_MS = 30_000;
+const GOOD_ACCURACY_M = 50;
+// Beyond this the position is shown, but flagged so the pin can be checked.
+export const ROUGH_ACCURACY_M = 100;
 
 /** Rejects rather than hanging, so a caller's `finally` always runs. */
 function withDeadline(promise, ms, message) {
@@ -33,7 +39,10 @@ const shape = (pos) => ({
     pos.coords.speed != null && pos.coords.speed >= 0
       ? Number((pos.coords.speed * 3.6).toFixed(1))
       : undefined,
+  accuracy_m: pos.coords.accuracy != null ? Math.round(pos.coords.accuracy) : null,
 });
+
+const isPrecise = (pos) => pos?.coords?.accuracy != null && pos.coords.accuracy <= GOOD_ACCURACY_M;
 
 /**
  * Asks once, and only when the answer is not already on record. Asking on
@@ -51,7 +60,7 @@ export async function ensureLocationPermission() {
  * Returns `{ latitude, longitude, speed_kmph? }`, or throws with a message
  * worth showing. `stale` is true when the fix came from the cache.
  */
-export async function readPosition({ accuracy = Location.Accuracy.Balanced } = {}) {
+export async function readPosition({ accuracy = Location.Accuracy.High } = {}) {
   if (!(await ensureLocationPermission())) {
     throw Object.assign(
       new Error('Location permission was declined. Set your position on the map instead.'),
@@ -59,11 +68,22 @@ export async function readPosition({ accuracy = Location.Accuracy.Balanced } = {
     );
   }
 
-  // Instant when the phone already knows where it is, which is most of the
-  // time outdoors with another app having asked recently.
+  // With location switched off in the phone's settings, every read below
+  // would only time out. Android can show its own "turn on location" dialog.
+  if (!(await Location.hasServicesEnabledAsync().catch(() => true))) {
+    await Location.enableNetworkProviderAsync().catch(() => {});
+    if (!(await Location.hasServicesEnabledAsync().catch(() => true))) {
+      throw Object.assign(
+        new Error('Location is switched off on this phone. Turn it on, or set your position on the map.'),
+        { code: 'SERVICES_OFF' }
+      );
+    }
+  }
+
+  // Instant when the phone already has a recent, precise fix.
   try {
     const known = await Location.getLastKnownPositionAsync({ maxAge: LAST_KNOWN_MAX_AGE_MS });
-    if (known) return { ...shape(known), stale: false };
+    if (isPrecise(known)) return { ...shape(known), stale: false };
   } catch {
     // Not worth reporting: the fresh read below is the real attempt.
   }
