@@ -25,6 +25,9 @@ const MILESTONE_ORDER = ['ASSIGNED', 'ENROUTE', 'ARRIVED', 'ONBOARD', 'COMPLETED
 // Odometer sanity bounds, in kilometres, for one hop between GPS fixes.
 const MIN_HOP_KM = 0.02;  // below this the vehicle is parked and the fix is drifting
 const MAX_HOP_KM = 5;     // above this the signal was lost, not driven through
+
+// Sent to the patient by push, in-app notification and email when a trip completes.
+const FEEDBACK_REQUEST = 'Your trip was completed. Please give your valuable feedback.';
 const MILESTONE_TO_BOOKING_STATUS = {
   ASSIGNED: 'ASSIGNED',
   ENROUTE: 'ENROUTE',
@@ -425,17 +428,48 @@ router.post('/trips/:tripId/status', requireProvider, asyncRoute(async (req, res
   };
   notifications.notify(booking.user_id, {
     title: milestoneTitles[trip_milestone] || `Trip ${trip_milestone}`,
-    body: messaging.templates.statusUpdate({ booking, milestone: trip_milestone, etaMinutes: trip.eta_minutes }).body,
+    body: isCompletion
+      ? FEEDBACK_REQUEST
+      : messaging.templates.statusUpdate({ booking, milestone: trip_milestone, etaMinutes: trip.eta_minutes }).body,
     eventType: trip_milestone,
     bookingId: trip.booking_id,
     // ARRIVED is the one the patient has to act on - the ambulance is outside
-    // and nobody is looking at the app.
+    // and nobody is looking at the app. COMPLETED asks for feedback, which the
+    // patient gives after the app is closed, so it has to reach the phone too.
     push: trip_milestone === 'ARRIVED'
       ? { priority: 'high', data: { type: 'ARRIVED', booking_id: trip.booking_id } }
-      : null,
+      : isCompletion
+        ? { priority: 'default', data: { type: 'FEEDBACK', booking_id: trip.booking_id } }
+        : null,
   });
 
-  const patient = db.prepare('SELECT phone_no FROM users WHERE user_id = ?').get(booking.user_id);
+  const patient = db.prepare('SELECT phone_no, email_id, full_name FROM users WHERE user_id = ?').get(booking.user_id);
+
+  // The same request by email, with the bill, for a patient who has an address.
+  // Not awaited: a slow mail provider must not hold up the driver's response.
+  if (isCompletion && patient.email_id) {
+    messaging
+      .sendEmail({
+        emailId: patient.email_id,
+        phoneNo: patient.phone_no,
+        subject: `Your trip ${trip.booking_id} is complete - please share your feedback`,
+        body: [
+          `Dear ${patient.full_name},`,
+          '',
+          FEEDBACK_REQUEST,
+          '',
+          `Booking: ${trip.booking_id}`,
+          invoice ? `Amount: Rs ${invoice.fare_amount.toFixed(2)}` : null,
+          '',
+          'Open the Ambulance Booking app, go to Trips, and rate your ride.',
+          '',
+          'Ambulance Booking System',
+        ].filter((line) => line !== null).join('\n'),
+        templateId: 'trip_completed_feedback',
+        bookingId: trip.booking_id,
+      })
+      .catch(() => {});
+  }
   messaging
     .sendWhatsApp({
       phoneNo: patient.phone_no,
