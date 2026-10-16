@@ -52,4 +52,15 @@ test('completing a trip asks the patient for feedback in the app and by email', 
   assert.equal(email.recipient_email, 'adithya@example.in');
   assert.match(email.body, /valuable feedback/);
   assert.match(email.body, /Amount: Rs \d+\.\d{2}/);
+  assert.ok(email.body.includes(`/open/feedback/${bookingId}`), 'the email links to the feedback screen');
+});
+
+test('the feedback link opens the app on that trip', async () => {
+  const url = await startTestServer();         // already running; returns its address
+  const ok = await fetch(`${url}/open/feedback/BK00000001`);
+  assert.equal(ok.status, 200);
+  assert.match(await ok.text(), /ambulancebooking:\/\/feedback\/BK00000001/);
+
+  const bad = await fetch(`${url}/open/feedback/<script>`);
+  assert.equal(bad.status, 404, 'only a well-formed booking id is echoed into the page');
 });

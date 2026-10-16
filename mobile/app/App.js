@@ -18,6 +18,7 @@ import { AuthProvider, useAuth } from './src/lib/auth';
 import { FONT, colors } from './src/lib/theme';
 import { Loading } from './src/components/ui';
 import PatientAlerts from './src/components/PatientAlerts';
+import { navigationRef } from './src/lib/navigation';
 
 import AuthScreen from './src/screens/AuthScreen';
 
@@ -221,7 +222,7 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <AuthProvider>
-        <NavigationContainer theme={navTheme}>
+        <NavigationContainer ref={navigationRef} theme={navTheme}>
           {/* Dark glyphs, because the bar now sits on a white header. */}
           <StatusBar style="dark" />
           <Root />

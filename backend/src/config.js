@@ -17,6 +17,11 @@ const offsetMinutes = (v, d) => {
 const config = {
   env: process.env.NODE_ENV || 'development',
   port: int(process.env.PORT, 4000),
+  // Where this server is reachable from outside, for links put in emails.
+  // Render sets RENDER_EXTERNAL_URL on its own.
+  publicUrl: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${int(process.env.PORT, 4000)}`).replace(/\/$/, ''),
+  // The app's URL scheme, from mobile/app/app.json.
+  appScheme: process.env.APP_SCHEME || 'ambulancebooking',
   corsOrigin: process.env.CORS_ORIGIN || '*',
 
   // How many accounts one address may create in an hour (NF.3). Configurable

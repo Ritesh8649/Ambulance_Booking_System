@@ -51,6 +51,26 @@ app.use(express.json({
 app.use(express.urlencoded({ extended: true }));
 if (config.env !== 'test') app.use(morgan('dev'));
 
+// Opens the app on a trip's feedback screen. Email clients will not follow an
+// app's own URL scheme, so the email links here and this page hands over.
+app.get('/open/feedback/:bookingId', (req, res) => {
+  const id = String(req.params.bookingId);
+  if (!/^BK\d{8}$/.test(id)) return res.status(404).send('Unknown trip');
+  const appLink = `${config.appScheme}://feedback/${id}`;
+  res.type('html').send(`<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rate your trip</title>
+<style>body{font-family:system-ui,sans-serif;background:#0f1520;color:#e8eef7;text-align:center;padding:48px 20px}
+a.btn{display:inline-block;background:#e63946;color:#fff;padding:14px 28px;border-radius:10px;text-decoration:none;font-weight:600;font-size:17px}
+p{color:#93a4bb}</style></head><body>
+<h2>Trip ${id} is complete</h2>
+<p>Opening the Ambulance Booking app so you can rate your trip&hellip;</p>
+<p><a class="btn" href="${appLink}">Open the app and give feedback</a></p>
+<p>Nothing happened? Make sure the app is installed, then tap the button.</p>
+<script>location.href=${JSON.stringify(appLink)};</script>
+</body></html>`);
+});
+
 app.get('/health', (req, res) => {
   const counts = db.prepare(
     `SELECT (SELECT COUNT(*) FROM users) AS users,
