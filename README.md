@@ -260,9 +260,27 @@ true road distance, and the gap narrows as the ping interval shortens.
 
 ## Alerts and calling
 
-**Push notifications** are the only channel that reaches a phone whose app is
-closed, which makes them the one that decides whether a dispatch offer is seen
-at all — everything else in the app assumes somebody is looking. The socket
+**Reaching a driver** happens on two levels, and they are worth keeping apart.
+
+A *local* alert is raised by the app itself: a heads-up banner, a sound and a
+vibration, scheduled on the device and delivered by the operating system. It
+needs no push service, no credentials and no money, and it is what makes a
+45-second offer noticeable rather than merely present on a screen nobody is
+looking at. It only fires while the app is running, because the socket that
+carried the offer dies with the process.
+
+A *push* notification is the only thing that reaches a phone whose app is
+closed. On Android that means Firebase Cloud Messaging, and **this build has
+no FCM credentials**, so `getExpoPushTokenAsync` fails and nothing is ever
+sent. Expo Go works because it carries Expo's own credentials; a built APK
+does not. Fixing it needs a Firebase project, its service-account key uploaded
+with `eas credentials`, and a rebuild.
+
+Until then the alerts panel says exactly that rather than reporting a flat
+failure, and the test button demonstrates the local alert instead.
+
+**Push notifications**, when configured, are the channel that decides whether
+a dispatch offer is seen at all — everything else in the app assumes somebody is looking. The socket
 needs the app open; the inbox needs the screen on; a driver waiting for work is
 doing neither, and an offer expires in 45 seconds.
 
@@ -379,8 +397,21 @@ Email is worth knowing about because it is the only channel with no conditions
 attached: no 24-hour window, no template approval, and no billing relationship.
 Where a business-initiated WhatsApp message needs all three, an email needs none.
 
-**Maps** — defaults to OpenStreetMap: Nominatim for geocoding, OSRM for routing, no
-API key required. Set `MAPS_PROVIDER=google` with a `GOOGLE_MAPS_API_KEY` to switch to
+**Maps** — three separate things, worth keeping apart:
+
+| | Supplier | Key needed | Runs on |
+|---|---|---|---|
+| Geocoding (address → point) | Nominatim | no | backend |
+| Routing (road line, ETA) | OSRM | no | backend |
+| Tiles (the picture) | MapTiler | yes, client-side | app |
+
+Only the tiles need a key, and it is a *client-side* key: it travels in the
+tile URL by design, and MapTiler restricts it by origin in their dashboard
+rather than by keeping it secret. Set `EXPO_PUBLIC_MAPTILER_KEY` to use it;
+leave it empty and the map falls back to OpenStreetMap's own tiles, which work
+and look plainer.
+
+Nominatim and OSRM need no key. Set `MAPS_PROVIDER=google` with a `GOOGLE_MAPS_API_KEY` to switch to
 the Google Geocoding and Directions APIs. If a provider is unreachable the system
 falls back to straight-line distance and an average-speed ETA rather than failing the
 dispatch (constraint C.2).
@@ -513,6 +544,32 @@ Android blocks plain HTTP by default, so `usesCleartextTraffic` is set in
 iOS is out of scope: Apple requires a paid Developer Program membership to
 install an app on a device at all, and the build itself needs macOS. The same
 code runs on an iPhone through Expo Go if you ever want to show it.
+
+## Digital Brand Identity Manual
+
+The interface follows the Government of India's Digital Brand Identity Manual
+(DBIM v3, MeitY, January 2025), which applies to government mobile apps
+through Annexure D.
+
+| DBIM | Applied |
+|---|---|
+| 2.1 One primary colour group | **Cinnamon Red** — the manual asks for the group that best represents the organisation's function |
+| 2.2 Functional palette | `#FFFFFF` background, `#150202` text, Linen `#EBEAEA`, greys `#C6C6C6`/`#8E8E8E`/`#606060` |
+| 2.2 Status colours | `#198754` success, `#FFC107` warning, `#DC3545` error, `#0D6EFD` information and links |
+| 4.1 Typeface | **Noto Sans**, bundled in all four weights |
+| 4.3.2 Mobile type scale | H1 24, H2 20, H3 16, body 14, small 13, tiny 12 |
+| D.1.5 Contact | the About panel names the team on every role's profile |
+
+This replaced a dark theme. DBIM mandates Inclusive White as the page
+background with dark text and describes no dark variant, so complying meant
+inverting the design rather than adjusting it. Everything flowed through
+`src/lib/theme.js`, which is what made that a single edit rather than a sweep.
+
+**Not met, and worth saying so rather than implying otherwise:** icons are
+emoji, where section 3 asks for the DBIM toolkit set in PNG/SVG/WEBP at
+24/32/48/64 px. Annexure D also requires NSSO (MeriPehchaan) single sign-on, a
+CERT-IN security audit, the Central Content Publishing System APIs and hosting
+on the Gov.In App Store — none of which a course project can obtain.
 
 ## Notes on scope
 

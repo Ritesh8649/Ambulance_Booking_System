@@ -5,7 +5,7 @@ import { api } from '../../lib/api';
 import { getSocket, useResync, useSocketEvent } from '../../lib/socket';
 import { MILESTONE_STEPS } from '../../lib/config';
 import { confirmAction } from '../../lib/confirm';
-import { STATUS_TEXT, colors, dateTimeOf, money, radius, spacing, typo } from '../../lib/theme';
+import { FONT, STATUS_TEXT, colors, dateTimeOf, money, radius, spacing, typo } from '../../lib/theme';
 import { Banner, Body, Button, Card, EmptyState, H2, Loading, Pill, Row, Small, StepTrail } from '../../components/ui';
 import { callCounterparty } from '../../lib/calling';
 import MapPanel from '../../components/MapPanel';
@@ -59,6 +59,10 @@ export default function TrackScreen({ navigation }) {
         ? {
             ...prev,
             ambulance_location: { latitude: p.latitude, longitude: p.longitude, gps_timestamp: p.gps_timestamp },
+            // The road ahead changes as the ambulance moves, so the line
+            // drawn on the map has to change with it rather than staying as
+            // it was when the screen opened.
+            route_points: p.route_points?.length ? p.route_points : prev.route_points,
             trip: { ...prev.trip, eta_minutes: p.eta_minutes, route_distance_km: p.route_distance_km },
           }
         : prev
@@ -101,9 +105,22 @@ export default function TrackScreen({ navigation }) {
   const currentIndex = MILESTONE_STEPS.findIndex((s) => s.code === (booking.trip?.trip_milestone || 'ASSIGNED'));
 
   const markers = [
-    { latitude: booking.latitude, longitude: booking.longitude, color: colors.accent, label: 'Pickup', radius: 11 },
+    {
+      latitude: booking.latitude, longitude: booking.longitude,
+      glyph: '📍', label: 'You', labelAlways: true,
+    },
     ...(track?.ambulance_location
-      ? [{ ...track.ambulance_location, color: colors.ok, label: 'Ambulance', radius: 11 }]
+      ? [{
+          ...track.ambulance_location,
+          glyph: '🚑',
+          // Kept open: this is the thing being watched, and a tooltip that
+          // needs a tap is no use to somebody holding the phone and looking up
+          // the road every few seconds.
+          labelAlways: true,
+          label: track.trip?.eta_minutes != null
+            ? `Arriving in ${track.trip.eta_minutes} min`
+            : 'On the way',
+        }]
       : []),
   ];
 
@@ -136,7 +153,7 @@ export default function TrackScreen({ navigation }) {
           <View style={styles.etaBox}>
             <Text style={styles.etaValue}>{track.trip.eta_minutes}</Text>
             <View>
-              <Body style={{ fontWeight: '700' }}>minutes away</Body>
+              <Body style={{ fontFamily: FONT.bold }}>minutes away</Body>
               <Small>
                 {track.trip.route_distance_km != null ? `${track.trip.route_distance_km} km by road` : ''}
               </Small>
@@ -267,5 +284,5 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.line,
   },
-  etaValue: { fontSize: 44, fontWeight: '800', color: colors.ok, lineHeight: 48 },
+  etaValue: { fontSize: 44, fontFamily: FONT.bold, color: colors.ok, lineHeight: 48 },
 });

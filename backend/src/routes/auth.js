@@ -38,7 +38,7 @@ const otpVerifyLimiter = rateLimit({
 });
 
 const registerLimiter = rateLimit({
-  max: 10,
+  max: config.registerLimitPerHour,
   windowMs: 60 * 60_000,
   key: (req) => req.ip,
   message: 'Too many accounts created from this device. Please try again later.',
@@ -76,18 +76,43 @@ function sessionResponse(user) {
 }
 
 // ------------------------------------------------- 0.1.1 register + verify
+/**
+ * Starts a registration. It does not finish one.
+ *
+ * Everything is checked here - the name, the number, the address, the
+ * password, and that neither identifier is already taken - so somebody learns
+ * their email is in use before waiting on a code rather than after. Then a
+ * code goes to the address, and `/otp/verify` is what actually creates the
+ * account.
+ *
+ * Splitting it this way is the whole point: an account cannot exist with an
+ * address nobody has proved. Creating one here and emailing afterwards would
+ * leave a real account behind whether or not the address was ever read, which
+ * is exactly the hole this closes.
+ */
 router.post('/register', registerLimiter, asyncRoute(async (req, res) => {
   const full_name = v.name(req.body.full_name);
   const phone_no = v.phone(req.body.phone_no);
   // Required, not optional: an address is how an account is reached and how it
   // is proved. The number beside it is contact data for the crew, and nothing
-  // here checks that it is real - see `phone_verified`.
+  // checks that it is real - see `phone_verified`.
   const email_id = v.email(v.required(req.body.email_id, 'email_id'));
   const role_code = v.oneOf(req.body.role_code || 'USER', ['USER', 'DRIVER', 'ORG'], 'role_code');
-  const password = v.password(req.body.password);
+  // Validated now so a weak one is rejected before a code is spent, but not
+  // stored: the client holds it and sends it back with the code. Keeping an
+  // unverified password hash lying about would be storing a credential for an
+  // account that may never exist.
+  //
+  // The details go with it so the check can refuse a password that is simply
+  // their own name, number or address - a common choice, and the first guess
+  // of anyone who knows them.
+  v.newPassword(req.body.password, 'password', { full_name, phone_no, email_id });
 
   if (findUserByPhone(phone_no)) {
-    return res.status(409).json({ error: 'An account already exists for this mobile number' });
+    return res.status(409).json({
+      error: 'An account already exists for this mobile number',
+      field: 'phone_no',
+    });
   }
   if (findUserByEmail(email_id)) {
     return res.status(409).json({
@@ -96,32 +121,31 @@ router.post('/register', registerLimiter, asyncRoute(async (req, res) => {
     });
   }
 
-  const now = nowIso();
-  const user_id = nextId('user');
-  // Patients are usable immediately; providers stay PENDING until an
-  // administrator verifies their documents (F.13).
-  const verification_status = role_code === 'USER' ? 'VERIFIED' : 'PENDING';
+  const otp_code = String(Math.floor(100000 + Math.random() * 900000));
+  const otp_expiry = new Date(Date.now() + OTP_TTL_MS).toISOString();
 
+  db.prepare('UPDATE otps SET consumed = 1 WHERE identifier = ? AND consumed = 0').run(email_id);
   db.prepare(
-    `INSERT INTO users (user_id, full_name, phone_no, email_id, email_verified, phone_verified,
-                        password_hash, role_code, verification_status, registration_date,
-                        created_at, updated_at)
-     VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    user_id, full_name, phone_no, email_id,
-    bcrypt.hashSync(password, 12),           // bcrypt digest, cost 12
-    role_code, verification_status, now.slice(0, 10), now, now
-  );
+    `INSERT INTO otps (identifier, identifier_type, otp_code, otp_expiry, purpose,
+                       channel, destination, created_at)
+     VALUES (?, 'EMAIL', ?, ?, 'REGISTER', 'EMAIL', ?, ?)`
+  ).run(email_id, otp_code, otp_expiry, email_id, nowIso());
 
-  audit('USER_REGISTERED', {
-    actorUserId: user_id, actorRole: role_code, entityType: 'user', entityId: user_id,
-    details: { phone_no, role_code },
+  await messaging.sendOtp({ phoneNo: phone_no, otpCode: otp_code, channel: 'EMAIL', emailId: email_id });
+  audit('OTP_ISSUED', {
+    entityType: 'email', entityId: email_id,
+    details: { purpose: 'REGISTER', channel: 'EMAIL', role_code },
   });
 
-  const user = findUserByPhone(phone_no);
-  res.status(201).json({
-    message: 'Registration successful',
-    ...sessionResponse(user),
+  // 202: understood and under way, but nothing has been created yet.
+  res.status(202).json({
+    message: 'Check your email for a 6-digit code to finish creating your account',
+    needs_verification: true,
+    channel: 'EMAIL',
+    verifying: 'EMAIL',
+    sent_to: messaging.maskDestination(email_id, 'EMAIL'),
+    otp_expiry,
+    ...(config.exposeOtp ? { otp_code, dev_note: 'otp_code is exposed because EXPOSE_OTP_IN_RESPONSE=true' } : {}),
   });
 }));
 
@@ -252,6 +276,7 @@ router.post('/otp/verify', otpVerifyLimiter, asyncRoute(async (req, res) => {
   let full_name = null;
   let role_code = null;
   let new_phone = null;
+  let new_password = null;
   if (!user) {
     if (!verifyingEmail) {
       // A phone code is for proving a number on an account that exists. There
@@ -262,6 +287,14 @@ router.post('/otp/verify', otpVerifyLimiter, asyncRoute(async (req, res) => {
 
     full_name = req.body.full_name ? v.name(req.body.full_name) : null;
     new_phone = req.body.phone_no ? v.phone(req.body.phone_no) : null;
+    // Optional: the registration form sends one, the code-only path does not.
+    // The schema allows a NULL hash for accounts that sign in by code every
+    // time rather than holding a password they never chose.
+    new_password = req.body.password
+      ? v.newPassword(req.body.password, 'password', {
+          full_name, phone_no: new_phone, email_id: identifier,
+        })
+      : null;
 
     if (!full_name || !new_phone) {
       return res.status(404).json({
@@ -297,16 +330,21 @@ router.post('/otp/verify', otpVerifyLimiter, asyncRoute(async (req, res) => {
       `INSERT INTO users (user_id, full_name, phone_no, email_id, email_verified, phone_verified,
                           password_hash, role_code, verification_status, registration_date,
                           created_at, updated_at)
-       VALUES (?, ?, ?, ?, 1, 0, NULL, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?)`
     ).run(
-      user_id, full_name, new_phone, identifier, role_code,
+      user_id, full_name, new_phone, identifier,
+      new_password ? bcrypt.hashSync(new_password, 12) : null,   // bcrypt, cost 12
+      role_code,
       role_code === 'USER' ? 'VERIFIED' : 'PENDING',
       now.slice(0, 10), now, now
     );
 
     audit('USER_REGISTERED', {
       actorUserId: user_id, actorRole: role_code, entityType: 'user', entityId: user_id,
-      details: { email_id: identifier, role_code, via: 'otp', channel: row.channel },
+      details: {
+        email_id: identifier, role_code, channel: row.channel,
+        via: new_password ? 'registration form' : 'code only',
+      },
     });
 
     user = findUserByEmail(identifier);
@@ -438,7 +476,11 @@ router.patch('/me', authenticate, asyncRoute(async (req, res) => {
 }));
 
 router.post('/password', authenticate, asyncRoute(async (req, res) => {
-  const next = v.password(req.body.new_password, 'new_password');
+  const next = v.newPassword(req.body.new_password, 'new_password', {
+    full_name: req.user.full_name,
+    phone_no: req.user.phone_no,
+    email_id: req.user.email_id,
+  });
 
   // An account registered by OTP has no password to confirm, and demanding one
   // would strand it on code-only sign-in for ever. The bearer token is already
@@ -461,6 +503,123 @@ router.post('/password', authenticate, asyncRoute(async (req, res) => {
   res.json({
     message: settingFirstPassword ? 'Password set' : 'Password updated',
     first_password: settingFirstPassword,
+  });
+}));
+
+// ------------------------------------------------- forgotten password (F.1)
+/**
+ * Sends a reset code to an address.
+ *
+ * The reply is the same whether or not an account exists. Saying "no account
+ * found" would turn this into a way to ask the server which addresses are
+ * registered, one address at a time, without signing in to anything (NF.3).
+ * Somebody who mistypes their own address learns it from the email that never
+ * arrives, which is the cost of not answering that question for everyone else.
+ *
+ * The code is issued with purpose RESET and `/password/reset` accepts no
+ * other, so a sign-in code read over somebody's shoulder cannot be turned
+ * into a password change.
+ */
+router.post('/password/forgot', otpRequestLimiter, asyncRoute(async (req, res) => {
+  const email_id = v.email(v.required(req.body.email_id, 'email_id'));
+  const neutral = {
+    message: 'If that address has an account, a reset code is on its way to it',
+    sent_to: messaging.maskDestination(email_id, 'EMAIL'),
+  };
+
+  const user = findUserByEmail(email_id);
+  if (!user) {
+    audit('PASSWORD_RESET_REQUESTED', {
+      entityType: 'email', entityId: email_id, details: { account: 'none' },
+    });
+    return res.json(neutral);
+  }
+
+  if (user.verification_status === 'SUSPENDED') {
+    // Same answer again: a suspended account is still an account, and saying
+    // so here would disclose both its existence and its state.
+    audit('PASSWORD_RESET_REQUESTED', {
+      actorUserId: user.user_id, entityType: 'email', entityId: email_id,
+      details: { refused: 'suspended' },
+    });
+    return res.json(neutral);
+  }
+
+  const otp_code = String(Math.floor(100000 + Math.random() * 900000));
+  const otp_expiry = new Date(Date.now() + OTP_TTL_MS).toISOString();
+
+  db.prepare('UPDATE otps SET consumed = 1 WHERE identifier = ? AND consumed = 0').run(email_id);
+  db.prepare(
+    `INSERT INTO otps (identifier, identifier_type, otp_code, otp_expiry, purpose,
+                       channel, destination, created_at)
+     VALUES (?, 'EMAIL', ?, ?, 'RESET', 'EMAIL', ?, ?)`
+  ).run(email_id, otp_code, otp_expiry, email_id, nowIso());
+
+  await messaging.sendOtp({
+    phoneNo: user.phone_no, otpCode: otp_code, channel: 'EMAIL', emailId: email_id,
+  });
+  audit('PASSWORD_RESET_REQUESTED', {
+    actorUserId: user.user_id, entityType: 'user', entityId: user.user_id,
+  });
+
+  res.json({
+    ...neutral,
+    otp_expiry,
+    ...(config.exposeOtp ? { otp_code, dev_note: 'otp_code is exposed because EXPOSE_OTP_IN_RESPONSE=true' } : {}),
+  });
+}));
+
+/**
+ * Sets a new password against a reset code.
+ *
+ * Every existing session is revoked. Somebody resetting a password has either
+ * forgotten it or suspects it is known to someone else, and in the second case
+ * leaving that someone else signed in would defeat the whole exercise. The
+ * person doing the reset signs in again afterwards, which is a small price.
+ */
+router.post('/password/reset', otpVerifyLimiter, asyncRoute(async (req, res) => {
+  const email_id = v.email(v.required(req.body.email_id, 'email_id'));
+  const otp_code = String(v.required(req.body.otp_code, 'otp_code')).trim();
+
+  const row = db.prepare(
+    `SELECT * FROM otps WHERE identifier = ? AND consumed = 0 AND purpose = 'RESET'
+     ORDER BY id DESC LIMIT 1`
+  ).get(email_id);
+
+  if (!row || row.otp_code !== otp_code) {
+    return res.status(401).json({ error: 'Incorrect or expired reset code' });
+  }
+  if (new Date(row.otp_expiry).getTime() < Date.now()) {
+    return res.status(401).json({ error: 'This reset code has expired' });
+  }
+
+  const user = findUserByEmail(email_id);
+  if (!user) return res.status(401).json({ error: 'Incorrect or expired reset code' });
+
+  // Checked before the code is consumed, so a password the rules refuse does
+  // not cost somebody their one code and another round trip through email.
+  const next = v.newPassword(req.body.new_password, 'new_password', {
+    full_name: user.full_name, phone_no: user.phone_no, email_id: user.email_id,
+  });
+
+  db.prepare('UPDATE otps SET consumed = 1 WHERE id = ?').run(row.id);
+
+  const now = nowIso();
+  db.prepare('UPDATE users SET password_hash = ?, email_verified = 1, updated_at = ? WHERE user_id = ?')
+    .run(bcrypt.hashSync(next, 12), now, user.user_id);
+
+  const revoked = db.prepare(
+    'UPDATE sessions SET revoked = 1, revoked_at = ? WHERE user_id = ? AND revoked = 0'
+  ).run(now, user.user_id).changes;
+
+  audit('PASSWORD_RESET', {
+    actorUserId: user.user_id, entityType: 'user', entityId: user.user_id,
+    details: { sessions_revoked: revoked },
+  });
+
+  res.json({
+    message: 'Password reset. Sign in with your new password.',
+    sessions_revoked: revoked,
   });
 }));
 

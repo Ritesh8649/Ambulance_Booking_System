@@ -50,7 +50,9 @@
           "color": "#e63946",
           "defaultChannel": "dispatch"
         }
-      ]
+      ],
+      "expo-font",
+      "expo-splash-screen"
     ],
     "extra": {
       "eas": {

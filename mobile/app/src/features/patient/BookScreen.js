@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
-import * as Location from 'expo-location';
+import { readPosition as readDevicePosition } from '../../lib/location';
 import { useFocusEffect } from '@react-navigation/native';
 import { api } from '../../lib/api';
 import { useResync, useSocketEvent } from '../../lib/socket';
 import { confirmAction } from '../../lib/confirm';
 import { AMBULANCE_TYPES } from '../../lib/config';
-import { colors, money, radius, spacing, typo } from '../../lib/theme';
+import { FONT, colors, money, radius, spacing, typo } from '../../lib/theme';
 import { Banner, Body, Button, Card, Field, H2, Loading, Pill, Small } from '../../components/ui';
 import MapPanel from '../../components/MapPanel';
 
@@ -49,20 +49,19 @@ export default function BookScreen({ navigation }) {
     setLocating(true);
     setError('');
     try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        setError('Location permission was declined. Type an address or tap the map to drop a pin instead.');
-        return;
-      }
-      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-      const coords = {
-        latitude: Number(pos.coords.latitude.toFixed(6)),
-        longitude: Number(pos.coords.longitude.toFixed(6)),
-      };
+      // Times out and falls back to a cached fix rather than waiting for one
+      // that may never come - this runs on mount, so a hang here is a screen
+      // that never finishes loading.
+      const pos = await readDevicePosition();
+      const coords = { latitude: pos.latitude, longitude: pos.longitude };
       const rev = await api.get(`/api/geo/reverse?lat=${coords.latitude}&lng=${coords.longitude}`);
       setPickup({ ...coords, address_text: rev.location.address_text, pincode: rev.location.pincode });
     } catch (e) {
-      setError(e.message || 'Could not read your location');
+      setError(
+        e.code === 'DENIED'
+          ? 'Location permission was declined. Type an address or tap the map to drop a pin instead.'
+          : e.message || 'Could not read your location'
+      );
     } finally {
       setLocating(false);
     }
@@ -149,10 +148,14 @@ export default function BookScreen({ navigation }) {
   }
 
   const markers = [
-    ...(pickup ? [{ ...pickup, color: colors.accent, label: 'Pickup', radius: 11 }] : []),
+    ...(pickup
+      ? [{ ...pickup, kind: 'pickup', glyph: '📍', label: 'Pickup — drag to adjust' }]
+      : []),
     ...nearby.slice(0, 10).map((a) => ({
-      latitude: a.latitude, longitude: a.longitude, color: colors.ok, radius: 7,
-      label: `${a.ambulance_type} · ${a.distance_km} km`,
+      latitude: a.latitude,
+      longitude: a.longitude,
+      glyph: '🚑',
+      label: `${a.ambulance_type} · ${a.distance_km} km away`,
     })),
   ];
 
@@ -169,7 +172,7 @@ export default function BookScreen({ navigation }) {
       <Card>
         <H2>Where are you?</H2>
         <Small style={{ marginTop: 4, marginBottom: spacing.md }}>
-          Tap the map to move the pin, or search for a landmark.
+          Move the map so the pin sits on you, or search for a landmark.
         </Small>
 
         <MapPanel
@@ -267,7 +270,7 @@ export default function BookScreen({ navigation }) {
                 <Text
                   style={{
                     fontSize: 15,
-                    fontWeight: t.urgent ? '800' : '600',
+                    fontFamily: t.urgent ? FONT.bold : FONT.semibold,
                     color: selected ? colors.white : t.urgent ? colors.danger : colors.text,
                   }}
                 >
@@ -351,8 +354,8 @@ export default function BookScreen({ navigation }) {
 function FareRow({ label, value, bold }) {
   return (
     <View style={styles.fareRow}>
-      <Text style={[typo.small, bold && { color: colors.text, fontWeight: '700' }]}>{label}</Text>
-      <Text style={[typo.body, bold && { fontWeight: '700', fontSize: 17 }]}>{value}</Text>
+      <Text style={[typo.small, bold && { color: colors.text, fontFamily: FONT.bold }]}>{label}</Text>
+      <Text style={[typo.body, bold && { fontFamily: FONT.bold, fontSize: 17 }]}>{value}</Text>
     </View>
   );
 }

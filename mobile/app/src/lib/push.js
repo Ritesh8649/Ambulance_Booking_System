@@ -56,22 +56,39 @@ async function ensureChannels() {
  * whether to say anything. Declining must not break anything: the app still
  * works, it just cannot reach you when it is closed.
  */
+/**
+ * Permission and channels, which are what a *local* alert needs.
+ *
+ * Separate from the push token on purpose. Android 13 requires permission
+ * before an app may post any notification, including one it raises itself, and
+ * the channel decides whether that notification may interrupt. Both of those
+ * matter even when no push service is reachable - so a build with no Firebase
+ * credentials still gets a banner and a sound while it is running, and the
+ * screen can say so rather than reporting a flat failure.
+ */
+export async function ensureNotificationPermission() {
+  if (!Device.isDevice || Platform.OS === 'web') return false;
+  try {
+    await ensureChannels();
+    const existing = await Notifications.getPermissionsAsync();
+    if (existing.granted) return true;
+    if (!existing.canAskAgain) return false;
+    // Asking again every launch is how an app teaches people to tap Deny, so
+    // this only prompts when the answer is not already on record.
+    const asked = await Notifications.requestPermissionsAsync();
+    return asked.granted;
+  } catch {
+    return false;
+  }
+}
+
 export async function registerForPush() {
   // The emulator and the web build have no push service to register with.
   if (!Device.isDevice) return { token: null, reason: 'Alerts need a real phone, not a simulator.' };
   if (Platform.OS === 'web') return { token: null, reason: 'Alerts are only available in the app.' };
 
   try {
-    await ensureChannels();
-
-    const existing = await Notifications.getPermissionsAsync();
-    let status = existing.status;
-    // Asking again every launch is how an app teaches people to tap Deny, so
-    // this only prompts when the answer is not already on record.
-    if (status !== 'granted' && existing.canAskAgain) {
-      ({ status } = await Notifications.requestPermissionsAsync());
-    }
-    if (status !== 'granted') {
+    if (!(await ensureNotificationPermission())) {
       return { token: null, reason: 'Alerts are switched off for this app in your phone settings.' };
     }
 
@@ -79,7 +96,28 @@ export async function registerForPush() {
       Constants?.expoConfig?.extra?.eas?.projectId ?? Constants?.easConfig?.projectId;
     if (!projectId) return { token: null, reason: 'This build has no Expo project id.' };
 
-    const { data: token } = await Notifications.getExpoPushTokenAsync({ projectId });
+    let token;
+    try {
+      ({ data: token } = await Notifications.getExpoPushTokenAsync({ projectId }));
+    } catch (err) {
+      // An installed Android app reaches Expo's push service through Firebase
+      // Cloud Messaging, and asks for its token through it. With no FCM
+      // credentials on the project that request fails here - before anything
+      // is ever sent - so the only symptom is that notifications never arrive,
+      // with nothing on screen to say why.
+      //
+      // Expo Go carries Expo's own credentials, which is exactly why this
+      // works there and stops working in a built APK.
+      const fcm = /firebase|fcm|default app|sender ?id|no credentials/i.test(err.message || '');
+      return {
+        token: null,
+        needsFcm: fcm,
+        reason: fcm
+          ? 'This build has no Firebase credentials, so Android cannot issue a push token. '
+            + 'Add FCM credentials to the Expo project and rebuild.'
+          : err.message,
+      };
+    }
 
     await api.post('/api/notifications/push-token', {
       push_token: token,
