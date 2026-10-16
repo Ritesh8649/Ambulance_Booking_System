@@ -17,6 +17,7 @@ import {
 import { AuthProvider, useAuth } from './src/lib/auth';
 import { FONT, colors } from './src/lib/theme';
 import { Loading } from './src/components/ui';
+import PatientAlerts from './src/components/PatientAlerts';
 
 import AuthScreen from './src/screens/AuthScreen';
 
@@ -108,12 +109,15 @@ function PatientHistoryStack() {
 
 function PatientTabs() {
   return (
+    <>
+    <PatientAlerts />
     <Tab.Navigator screenOptions={screenOptions}>
       <Tab.Screen name="Book" component={BookScreen} options={{ title: 'Book an ambulance', tabBarLabel: 'Book', tabBarIcon: icon('🚑') }} />
       <Tab.Screen name="Track" component={TrackScreen} options={{ title: 'Live tracking', tabBarLabel: 'Track', tabBarIcon: icon('📍') }} />
       <Tab.Screen name="History" component={PatientHistoryStack} options={{ headerShown: false, tabBarLabel: 'Trips', tabBarIcon: icon('🧾') }} />
       <Tab.Screen name="Account" component={PatientProfileScreen} options={{ title: 'Your account', tabBarLabel: 'Account', tabBarIcon: icon('👤') }} />
     </Tab.Navigator>
+    </>
   );
 }
 
